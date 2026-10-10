@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FloodSense AI – Live (Delhi)</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+body{margin:0;font-family:"Trebuchet MS",system-ui,sans-serif;color:#12303a;background:#eef3f4}
+header{padding:12px 16px}h1{margin:0;font-size:1.25rem}header p{margin:2px 0 0;font-size:.85rem;color:#5d7480}
+main{display:grid;grid-template-columns:1fr 340px;gap:12px;padding:0 16px 16px}
+@media(max-width:800px){main{grid-template-columns:1fr}}
+#map{height:560px;border-radius:10px;border:1px solid #cfdcdf}
+.card{background:#fff;border:1px solid #cfdcdf;border-radius:10px;padding:12px;margin-bottom:12px;font-size:.88rem}
+h2{font-size:.95rem;margin:0 0 6px}select,input,button{font:inherit;width:100%;padding:6px;margin:3px 0;border:1px solid #cfdcdf;border-radius:6px}
+button{background:#1d5fd1;color:#fff;border:0;cursor:pointer;font-weight:600}
+.row{padding:5px 8px;margin:4px 0;border-left:5px solid #d64545;background:#eef3f4}.row.w{border-color:#e0a21b}
+small{color:#5d7480}
+</style></head><body>
+<header><h1>FloodSense AI – live Delhi waterlogging predictor</h1>
+<p>Real map (OpenStreetMap), live rain forecast (Open-Meteo), real road routing (OSRM). Click the map to add a resident report.</p></header>
+<main><div id="map"></div><div>
+<div class="card"><h2>Live rain, next 6 hours</h2><div id="rain">Loading…</div><small>Source: Open-Meteo, Delhi centre.</small></div>
+<div class="card"><h2>Safer route</h2>
+<select id="from"></select><select id="to"></select>
+<button id="go">Find safer route</button><div id="rout"></div></div>
+<div class="card"><h2>Alerts</h2><div id="alerts"></div></div>
+<div class="card"><h2>Train on real data</h2>
+<small>Upload a CSV with columns: rain_mm_hr, lowlying (0-1), reports, flooded (0/1), for example from PWD or Delhi Traffic Police records. The model retrains in your browser.</small>
+<input type="file" id="csv" accept=".csv"><div id="mi"></div></div>
+<div class="card"><h2>Get alerts (SMS or email)</h2>
+<select id="sp"><option value="email">Email</option><option value="sms">SMS</option></select>
+<input id="se" placeholder="you@example.com or +919876543210">
+<small>Hold Cmd (Mac) or Ctrl to pick several places:</small>
+<select id="sz" multiple size="5"></select>
+<button id="sb">Subscribe</button><div id="sm"></div>
+<small>Needs the Backend URL below. Email: confirm via the link AWS sends you.</small></div>
+<div class="card"><h2>Backend</h2><input id="api" placeholder="API Gateway URL, e.g. https://xxx.execute-api.ap-south-1.amazonaws.com/Prod/"><small>When set, reports are sent to your DynamoDB backend.</small></div>
+</div></main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+// Hotspots named in PWD / Delhi Traffic Police lists. Coordinates are approximate: verify before real use.
+// low = low-lying factor estimate (0-1); replace with elevation or drain data.
+const H=[
+{id:"minto-bridge",n:"Minto Bridge",p:[28.6335,77.2255],low:.95},
+{id:"pul-prahladpur",n:"Pul Prahladpur underpass",p:[28.5025,77.2980],low:.95},
+{id:"ring-who",n:"Ring Road opp. WHO building",p:[28.6320,77.2400],low:.8},
+{id:"zakhira",n:"Zakhira underpass",p:[28.6600,77.1500],low:.8},
+{id:"jahangirpuri",n:"Jahangirpuri Metro Stn Road",p:[28.7260,77.1630],low:.7},
+{id:"loni-golchakkar",n:"Loni Road Golchakkar",p:[28.6830,77.2900],low:.7},
+{id:"karala",n:"Karala-Kanjhawala road",p:[28.7380,77.0550],low:.7},
+{id:"aiims",n:"AIIMS flyover",p:[28.5670,77.2070],low:.55},
+{id:"moolchand",n:"Moolchand underpass",p:[28.5640,77.2330],low:.6},
+{id:"dhaula-kuan",n:"Dhaula Kuan",p:[28.5920,77.1620],low:.5}];
+const PL=[["Rohini",28.7380,77.1170],["Connaught Place",28.6315,77.2167],["Dwarka",28.5823,77.0500],["Saket",28.5245,77.2066],["Nehru Place",28.5491,77.2518],["Laxmi Nagar",28.6304,77.2773],["Kashmere Gate",28.6675,77.2282]];
+const $=id=>document.getElementById(id),sg=z=>1/(1+Math.exp(-z));
+let W=[0,0,0,0],B=0,rain=0,fcst=[],reps={},api="",lines=[];
+const dot=x=>B+W.reduce((a,w,j)=>a+w*x[j],0);
+function train(D,msg){W=[0,0,0,0];B=0;for(let ep=0;ep<1500;ep++){let g=[0,0,0,0],gb=0;D.forEach(([x,y])=>{const d=sg(dot(x))-y;g=g.map((v,j)=>v+d*x[j]);gb+=d});W=W.map((w,j)=>w-4*g[j]/D.length);B-=4*gb/D.length}
+$("mi").innerHTML=`<small>${msg} (${D.length} rows). Weights: rain ${W[0].toFixed(1)}, low-lying ${W[1].toFixed(1)}, both ${W[2].toFixed(1)}, reports ${W[3].toFixed(1)}.</small>`}
+const feat=(r,l,k)=>{r=Math.min(r/80,1);k=Math.min(k,3)/3;return[r,l,r*l,k]};
+(function(){let s=7;const rnd=()=>(s=(s*16807)%2147483647)/2147483647,D=[];
+for(let n=0;n<800;n++){const r=rnd(),l=rnd(),k=Math.floor(rnd()*4)/3;D.push([[r,l,r*l,k],(r*80/55*l*1.15+k*.66+(rnd()-.5)*.25)>.65?1:0])}
+train(D,"Using synthetic starter data. Upload a real CSV to replace it")})();
+$("csv").onchange=async e=>{const t=(await e.target.files[0].text()).trim().split(/\r?\n/).slice(1).map(l=>l.split(",").map(Number)).filter(r=>r.length>=4&&r.every(v=>!isNaN(v)));
+if(t.length<20){$("mi").textContent="Need at least 20 valid rows.";return}train(t.map(r=>[feat(r[0],r[1],r[2]),r[3]?1:0]),"Trained on your CSV");refresh()};
+const risk=(h,r=rain)=>sg(dot(feat(r,h.low,reps[h.id]||0)));
+const col=v=>v>=.65?"#d64545":v>=.35?"#e0a21b":"#2f9e6e";
+const map=L.map("map").setView([28.62,77.2],11);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{attribution:"© OpenStreetMap contributors",maxZoom:18}).addTo(map);
+const mk=H.map(h=>L.circleMarker(h.p,{radius:11,weight:2,fillOpacity:.85}).addTo(map).bindPopup(h.n));
+PL.forEach(p=>{["from","to"].forEach(id=>$(id).add(new Option(p[0],p[1]+","+p[2])))});$("from").selectedIndex=0;$("to").selectedIndex=4;
+if($("sz"))H.forEach(h=>$("sz").add(new Option(h.n,h.id)));
+function refresh(){mk.forEach((m,i)=>{const v=risk(H[i]);m.setStyle({color:col(v),fillColor:col(v)});m.setPopupContent(`<b>${H[i].n}</b><br>Flood risk ${Math.round(v*100)}%<br>Reports: ${reps[H[i].id]||0}`)});
+$("alerts").innerHTML=H.map(h=>[h,risk(h)]).filter(x=>x[1]>=.35).sort((a,b)=>b[1]-a[1]).map(([h,v])=>`<div class="row ${v<.65?"w":""}"><b>${h.n}</b><br>${v>=.65?"Likely flooded":"Risky"} (${Math.round(v*100)}%)</div>`).join("")||"<small>No alerts right now.</small>"}
+async function loadRain(){try{const r=await(await fetch("https://api.open-meteo.com/v1/forecast?latitude=28.62&longitude=77.21&hourly=precipitation&timezone=Asia%2FKolkata&forecast_days=1")).json();
+const hr=new Date().getHours();fcst=r.hourly.precipitation.slice(hr,hr+6);rain=Math.max(0,...fcst.slice(0,2));
+$("rain").innerHTML=`<b>${rain.toFixed(1)} mm/hr</b> now<br><small>Next 6 h: ${fcst.map(v=>v.toFixed(1)).join(", ")} mm</small>`+(rain<1?"<br><small>It is dry now. Drag the slider below to test a storm.</small>":"");}
+catch(e){$("rain").textContent="Could not load live rain. Using the test slider."}
+$("rain").insertAdjacentHTML("beforeend",`<input type="range" id="sl" min="0" max="80" value="${Math.round(rain)}" aria-label="Test rainfall"><small id="sv"></small>`);
+$("sl").oninput=e=>{rain=+e.target.value;$("sv").textContent="Test rain: "+rain+" mm/hr";refresh()};refresh()}
+const dist=(a,b)=>{const R=6371000,t=Math.PI/180,dx=(b[1]-a[1])*t*Math.cos(a[0]*t),dy=(b[0]-a[0])*t;return R*Math.hypot(dx,dy)};
+$("go").onclick=async()=>{const a=$("from").value.split(","),b=$("to").value.split(",");if(a[0]===b[0]){$("rout").textContent="Pick two different places.";return}
+lines.forEach(l=>map.removeLayer(l));lines=[];$("rout").textContent="Finding routes…";
+try{const j=await(await fetch(`https://router.project-osrm.org/route/v1/driving/${a[1]},${a[0]};${b[1]},${b[0]}?alternatives=true&overview=full&geometries=geojson`)).json();
+const bad=H.filter(h=>risk(h)>=.65);
+const rs=j.routes.map(r=>{const pts=r.geometry.coordinates.map(c=>[c[1],c[0]]);return{r,pts,hit:bad.filter(h=>pts.some(p=>dist(p,h.p)<150))}});
+rs.sort((x,y)=>x.hit.length-y.hit.length||x.r.duration-y.r.duration);const best=rs[0],fast=j.routes[0];
+rs.forEach(x=>lines.push(L.polyline(x.pts,{color:x===best?"#1d5fd1":"#8aa",weight:x===best?6:3,opacity:.85}).addTo(map)));map.fitBounds(lines[0].getBounds());
+$("rout").innerHTML=`<b>${(best.r.distance/1000).toFixed(1)} km, ${Math.round(best.r.duration/60)} min</b><br>`+(best.hit.length?`Still passes ${best.hit.map(h=>h.n).join(", ")}. No fully dry route found.`:bad.length?"Avoids all roads with high flood risk.":"No flooding expected, so this is the fastest route.")+(best.r!==fast?`<br><small>Fastest route is ${Math.round(fast.duration/60)} min but crosses a flood risk point.</small>`:"")}
+catch(e){$("rout").textContent="Routing service unavailable. Try again."}};
+map.on("click",e=>{let h=H.map((x,i)=>[x,dist([e.latlng.lat,e.latlng.lng],x.p)]).sort((a,b)=>a[1]-b[1])[0];
+if(h[1]>600){$("rout").innerHTML="<small>Click within 600 m of a listed hotspot to report. Add new hotspots in the H list.</small>";return}
+const x=h[0];reps[x.id]=Math.min((reps[x.id]||0)+1,3);refresh();api=$("api").value.trim();
+if(api)fetch(api.replace(/\/?$/,"/")+"reports",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({zone:x.id,severity:reps[x.id]})}).catch(()=>{})});
+if($("sb"))$("sb").onclick=async()=>{const api=$("api")?$("api").value.trim():"",ep=$("se").value.trim(),pr=$("sp").value;
+const zs=Array.from($("sz").selectedOptions).map(o=>o.value);
+if(!api){$("sm").innerHTML="<small style='color:#d64545'>Please enter Backend URL below first.</small>";return}
+if(!ep){$("sm").innerHTML="<small style='color:#d64545'>Enter an email or phone number.</small>";return}
+if(!zs.length){$("sm").innerHTML="<small style='color:#d64545'>Select at least one hotspot zone.</small>";return}
+try{const r=await fetch(api.replace(/\/?$/,"/")+"subscribe",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({protocol:pr,endpoint:ep,zones:zs})});
+if(r.ok){$("sm").innerHTML="<small style='color:#2f9e6e'>Subscribed! Check email/SMS to confirm.</small>"}
+else{$("sm").innerHTML="<small style='color:#d64545'>Subscription failed. Check backend setup.</small>"}}
+catch(e){$("sm").innerHTML="<small style='color:#d64545'>Could not connect to backend.</small>"}};
+loadRain();
+</script></body></html>
