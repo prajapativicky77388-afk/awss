@@ -50,6 +50,25 @@ def get_risk(_event, _ctx=None):
     return resp(200, {"zones": items})
 
 
+def subscribe(event, _ctx=None):
+    """POST /subscribe  {protocol: 'email'|'sms', endpoint, zones?}"""
+    b = json.loads(event.get("body") or "{}")
+    protocol = (b.get("protocol") or "").strip().lower()
+    endpoint = (b.get("endpoint") or "").strip()
+    if protocol not in ("email", "sms") or not endpoint:
+        return resp(400, {"error": "protocol must be 'email' or 'sms' and endpoint is required"})
+    try:
+        sub = sns.subscribe(
+            TopicArn=os.environ["ALERT_TOPIC"],
+            Protocol=protocol,
+            Endpoint=endpoint,
+            ReturnSubscriptionArn=True,
+        )
+        return resp(200, {"ok": True, "subscriptionArn": sub.get("SubscriptionArn", "")})
+    except Exception as e:
+        return resp(500, {"error": str(e)})
+
+
 def forecast_mm_per_hr(lat, lon):
     """Open-Meteo is free and needs no key. Swap for IMD data if you have access."""
     url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=precipitation&forecast_days=1"

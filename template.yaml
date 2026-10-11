@@ -55,6 +55,19 @@ Resources:
       Events:
         Api: {Type: Api, Properties: {Path: /risk, Method: get}}
 
+  SubscribeFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handler.subscribe
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - sns:Subscribe
+              Resource: !Ref AlertTopic
+      Events:
+        Api: {Type: Api, Properties: {Path: /subscribe, Method: post}}
+
   ScoreZonesFn:
     Type: AWS::Serverless::Function
     Properties:
